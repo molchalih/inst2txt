@@ -2,6 +2,38 @@ from langdetect import detect
 import argostranslate.package, argostranslate.translate
 import time
 from db_manager import InstagramDataManager
+import re
+
+def clean_text(text: str) -> str:
+    """Removes emojis, newlines, and other unnecessary characters from text."""
+    if not text:
+        return ""
+    # Remove newlines and carriage returns, replacing them with a space
+    text = text.replace('\\n', ' ').replace('\\r', ' ')
+    
+    # Regex to remove emojis and many other symbols.
+    try:
+        # UCS-4
+        emoji_pattern = re.compile(u'['
+                                   u'\U0001F300-\U0001F5FF'  # symbols & pictographs
+                                   u'\U0001F600-\U0001F64F'  # emoticons
+                                   u'\U0001F680-\U0001F6FF'  # transport & map symbols
+                                   u'\U0001F1E0-\U0001F1FF'  # flags (iOS)
+                                   u'\U00002702-\U000027B0'
+                                   u'\U000024C2-\U0001F251'
+                                   ']+', flags=re.UNICODE)
+    except re.error:
+        # UCS-2
+        emoji_pattern = re.compile(u'('
+                                   u'\ud83c[\udf00-\udfff]|'
+                                   u'\ud83d[\udc00-\ude4f\ude80-\udeff]|'
+                                   u'[\u2600-\u26FF\u2700-\u27BF])+',
+                                   flags=re.UNICODE)
+    
+    text = emoji_pattern.sub(r'', text)
+    
+    # Replace multiple whitespace characters with a single space and strip
+    return re.sub(r'\s+', ' ', text).strip()
 
 def normalize_lang(code):
     return code.split("-")[0]
@@ -34,44 +66,42 @@ def smart_translate(text):
     ensure_package(from_code)
     return argostranslate.translate.translate(text, from_code, "en")
 
-def process_captions():
+def main():
     data_manager = InstagramDataManager()
-    reels = data_manager.get_selected_reels_with_captions()
-    for pk, caption in reels:
-        if not caption:
-            print(f"Reel {pk}: empty caption, skipping.")
+    reels_to_process = data_manager.get_selected_reels_with_captions()
+
+    for pk, caption, caption_english in reels_to_process:
+        # Check if already translated with meaningful content
+        if caption_english and caption_english.strip():
             continue
-        # Check if already translated
-        import sqlite3
-        conn = sqlite3.connect('data/instagram_data.db')
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(reels)")
-        columns = [row[1] for row in cursor.fetchall()]
-        already_translated = False
-        if 'caption_english' in columns:
-            cursor.execute("SELECT caption_english FROM reels WHERE pk = ?", (pk,))
-            row = cursor.fetchone()
-            if row and row[0]:
-                already_translated = True
-        conn.close()
-        if already_translated:
-            print(f"Reel {pk}: already has caption_english, skipping.")
+
+        # Clean the original caption before any processing
+        cleaned_caption = clean_text(caption)
+
+        if not cleaned_caption:
+            print(f"Reel {pk}: caption is empty or became empty after cleaning, skipping.")
+            # Save an empty string to mark as processed and prevent re-processing
+            data_manager.set_caption_english(pk, "")
             continue
+
         try:
-            lang = detect(caption)
+            lang = detect(cleaned_caption)
         except Exception:
             lang = 'unknown'
+
         if lang == 'en' or lang == 'unknown':
-            data_manager.set_caption_english(pk, caption)
-            print(f"Reel {pk}: caption is English or undetectable, copied.")
+            data_manager.set_caption_english(pk, cleaned_caption)
+            print(f"Reel {pk}: caption is English or undetectable, copied to caption_english.")
         else:
             try:
-                translation = smart_translate(caption)
+                print(f"Reel {pk}: translating from '{lang}'...")
+                translation = smart_translate(cleaned_caption)
                 data_manager.set_caption_english(pk, translation)
-                print(f"Reel {pk}: translated to English.")
+                print(f"Reel {pk}: successfully translated to English.")
             except Exception as e:
                 print(f"Reel {pk}: translation failed: {e}")
-                data_manager.set_caption_english(pk, caption)
+                # Save the cleaned, non-English caption to avoid re-processing a failed translation
+                data_manager.set_caption_english(pk, cleaned_caption)
 
 if __name__ == "__main__":
-    process_captions()
+    main()

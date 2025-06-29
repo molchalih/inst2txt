@@ -43,6 +43,16 @@ def recognize_track(filepath):
         result = recognizer.recognize_by_filebuffer(buf, 0)
         if use_path != filepath:
             os.remove(use_path)
+        
+        if not result:
+            return {
+                "track": "",
+                "artist": "",
+                "genres": [],
+                "score": 0.0,
+                "error": "ACRCloud returned empty result."
+            }
+            
         data = json.loads(result)
 
         music_list = data.get("metadata", {}).get("music", [])
@@ -78,57 +88,44 @@ def recognize_track(filepath):
 
 def analyze_selected_reels():
     data_manager = InstagramDataManager()
-    users = data_manager.get_all_selected_reels()
-    for username, reels_selected_list in users:
-        try:
-            reel_ids = json.loads(reels_selected_list)
-        except Exception as e:
-            print(f"Could not parse reels_selected_list for {username}: {e}")
+    load_dotenv()
+    
+    recognition_score_threshold = int(os.getenv("POLICY_MUSIC_RECOGNITION_SCORE", 70))
+
+    all_selected_pks = data_manager.get_all_selected_reel_pks()
+    if not all_selected_pks:
+        print("No selected reels were found to analyze.")
+        return
+
+    reels_to_analyze = data_manager.get_reels_for_music_analysis(all_selected_pks)
+
+    if not reels_to_analyze:
+        print("All selected reels have already been analyzed for audio type or have no audio track.")
+        return
+        
+    print(f"Found {len(reels_to_analyze)} reels to analyze for music content.")
+
+    for pk in reels_to_analyze:
+        audio_path = f"data/audio/{pk}.mp3"
+        if not os.path.exists(audio_path):
+            print(f"Reel {pk}: audio file not found at {audio_path}")
             continue
-        for pk in reel_ids:
-            # Check if audio_type is already set
-            import sqlite3
-            conn = sqlite3.connect('data/instagram_data.db')
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(reels)")
-            columns = [row[1] for row in cursor.fetchall()]
-            audio_type = None
-            if 'audio_type' in columns:
-                cursor.execute("SELECT audio_type FROM reels WHERE pk = ?", (pk,))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    audio_type = row[0]
-            if audio_type:
-                print(f"Reel {pk}: already has audio_type '{audio_type}', skipping.")
-                conn.close()
-                continue
-            # Check for no_audio flag
-            no_audio = False
-            if 'no_audio' in columns:
-                cursor.execute("SELECT no_audio FROM reels WHERE pk = ?", (pk,))
-                row = cursor.fetchone()
-                if row and row[0]:
-                    no_audio = True
-            conn.close()
-            if no_audio:
-                data_manager.set_audio_info(pk, audio_type="none", audio_content="")
-                print(f"Reel {pk}: no audio (flagged)")
-                continue
-            audio_path = f"data/audio/{pk}.mp3"
-            if not os.path.exists(audio_path):
-                print(f"Reel {pk}: audio file not found at {audio_path}")
-                continue
-            result = recognize_track(audio_path)
-            score = result.get("score", 0.0)
-            if score > 70:
-                genres = result.get("genres", [])
-                genre_str = ", ".join(genres) if genres else "unknown"
-                content = f"{result.get('track', '')} - {result.get('artist', '')} (genre: {genre_str})"
-                data_manager.set_audio_info(pk, audio_type="music", audio_content=content)
-                print(f"Reel {pk}: music detected, score={score}, content={content}")
-            else:
-                data_manager.set_audio_info(pk, audio_type="speech", audio_content="")
-                print(f"Reel {pk}: speech or low score ({score})")
+        result = recognize_track(audio_path)
+        score = result.get("score", 0.0)
+
+        if "error" in result:
+            print(f"Reel {pk}: recognition error: {result['error']}")
+
+        if score > recognition_score_threshold:
+            genres = result.get("genres", [])
+            genre_str = ", ".join(genres) if genres else "unknown"
+            content = f"{result.get('track', '')} - {result.get('artist', '')} (genre: {genre_str})"
+            data_manager.set_audio_info(pk, audio_type="music", audio_content=content)
+            print(f"Reel {pk}: music detected, score={score}, content={content}")
+        else:
+            data_manager.set_audio_info(pk, audio_type="speech", audio_content="")
+            print(f"Reel {pk}: speech or low score ({score})")
+
 
 if __name__ == "__main__":
     analyze_selected_reels()

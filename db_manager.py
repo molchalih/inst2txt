@@ -5,6 +5,8 @@ from typing import List, Tuple, Optional
 import logging
 from datetime import datetime
 import json
+import numpy as np
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -43,7 +45,13 @@ class InstagramDataManager:
                         all_reels_fetched_hiker INTEGER DEFAULT 0,
                         all_following_fetched_hiker INTEGER DEFAULT 0,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        kmeans_cluster INTEGER,
+                        hdbscan_cluster INTEGER,
+                        is_noise_point INTEGER DEFAULT 0,
+                        umap_x REAL,
+                        umap_y REAL,
+                        followed_creators_with_reels_selected_list TEXT
                     )
                 ''')
                 cursor.execute('''
@@ -62,7 +70,16 @@ class InstagramDataManager:
                         caption TEXT,
                         downloaded INTEGER DEFAULT 0,
                         video_unavailable INTEGER DEFAULT 0,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        no_audio INTEGER DEFAULT 0,
+                        audio_type TEXT,
+                        audio_content TEXT,
+                        caption_english TEXT,
+                        caption_english_short TEXT,
+                        model_description_text TEXT,
+                        model_description_embeddings BLOB,
+                        model_description_processed TEXT,
+                        audio_content_short TEXT
                     )
                 ''')
                 cursor.execute('''
@@ -77,6 +94,14 @@ class InstagramDataManager:
                         UNIQUE(user_pk, following_pk)
                     )
                 ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        email TEXT NOT NULL,
+                        instagram_url TEXT NOT NULL,
+                        timestamp DATETIME NOT NULL
+                    )
+                ''')
                 conn.commit()
                 logger.info("Database initialized successfully")
         except Exception as e:
@@ -88,40 +113,8 @@ class InstagramDataManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(instagram_accounts)")
-                columns = {row[1] for row in cursor.fetchall()}
-
-                # Add missing columns to instagram_accounts
-                new_columns = {
-                    'username': 'TEXT', 'insta_id': 'TEXT', 'follower_count': 'INTEGER',
-                    'following_count': 'INTEGER', 'reels_list': 'TEXT', 'url': 'TEXT',
-                    'full_name': 'TEXT', 'profile_pic_url': 'TEXT', 'biography': 'TEXT',
-                    'city_name': 'TEXT', 'followers_list': 'TEXT', 'following_list': 'TEXT',
-                    'reels_selected_list': 'TEXT', 'aesthetic_profile_text': 'TEXT', 'aesthetic_profile_embedding': 'TEXT',
-                    'all_reels_fetched_hiker': 'INTEGER DEFAULT 0',
-                    'all_following_fetched_hiker': 'INTEGER DEFAULT 0'
-                }
-                for col, col_type in new_columns.items():
-                    if col not in columns:
-                        cursor.execute(f"ALTER TABLE instagram_accounts ADD COLUMN {col} {col_type}")
-                        logger.info(f"Added '{col}' column to instagram_accounts table")
-
-                # Ensure username is unique
+                # Ensure username is unique, useful for older DBs.
                 cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_username_unique ON instagram_accounts(username)")
-
-                # Add missing columns to reels
-                cursor.execute("PRAGMA table_info(reels)")
-                reels_columns = {row[1] for row in cursor.fetchall()}
-                if 'downloaded' not in reels_columns:
-                    cursor.execute("ALTER TABLE reels ADD COLUMN downloaded INTEGER DEFAULT 0")
-                    logger.info("Added 'downloaded' column to reels table")
-                if 'video_unavailable' not in reels_columns:
-                    cursor.execute("ALTER TABLE reels ADD COLUMN video_unavailable INTEGER DEFAULT 0")
-                    logger.info("Added 'video_unavailable' column to reels table")
-                if 'caption' not in reels_columns:
-                    cursor.execute("ALTER TABLE reels ADD COLUMN caption TEXT")
-                    logger.info("Added 'caption' column to reels table")
-
                 conn.commit()
         except Exception as e:
             logger.error(f"Error migrating database schema: {e}")
@@ -162,7 +155,7 @@ class InstagramDataManager:
         try:
             username = url.rstrip('/').split('/')[-1]
             return username
-        except:
+        except Exception:
             return ""
     
     def sync_csv_to_database(self):
@@ -426,14 +419,21 @@ class InstagramDataManager:
                     ))
 
                 cursor.executemany('''
-                    INSERT OR IGNORE INTO reels (
+                    INSERT INTO reels (
                         pk, id, user_pk, code, taken_at, comment_count, 
                         like_count, play_count, video_duration, thumbnail_url, video_url, caption
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pk) DO UPDATE SET
+                        comment_count = excluded.comment_count,
+                        like_count = excluded.like_count,
+                        play_count = excluded.play_count,
+                        thumbnail_url = excluded.thumbnail_url,
+                        video_url = excluded.video_url,
+                        caption = excluded.caption
                 ''', reels_to_insert)
                 
                 conn.commit()
-                logger.info(f"Attempted to save {len(reels_to_insert)} reels. {cursor.rowcount} new reels were inserted.")
+                logger.info(f"Attempted to save/update {len(reels_to_insert)} reels. {cursor.rowcount} rows were affected.")
         except Exception as e:
             logger.error(f"Error saving reels to database: {e}")
             raise
@@ -474,6 +474,40 @@ class InstagramDataManager:
         except Exception as e:
             logger.error(f"Error getting following fetch status for user {username}: {e}")
             return False
+
+    def get_hiker_processing_status_for_all_users(self) -> List[Tuple[str, str, int, int, int]]:
+        """
+        Gets processing status for all users for Hiker.
+        Returns a list of tuples: (username, insta_id, all_reels_fetched_hiker, all_following_fetched_hiker, reel_count)
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT
+                        ia.username,
+                        ia.insta_id,
+                        ia.all_reels_fetched_hiker,
+                        ia.all_following_fetched_hiker,
+                        IFNULL(r.reel_count, 0) as reel_count
+                    FROM
+                        instagram_accounts ia
+                    LEFT JOIN (
+                        SELECT
+                            user_pk,
+                            COUNT(*) as reel_count
+                        FROM
+                            reels
+                        GROUP BY
+                            user_pk
+                    ) r ON ia.insta_id = r.user_pk
+                """)
+                users_status = cursor.fetchall()
+                logger.info(f"Retrieved hiker processing status for {len(users_status)} users.")
+                return users_status
+        except Exception as e:
+            logger.error(f"Error getting hiker processing status for all users: {e}")
+            return []
 
     def save_following(self, following_data: List[dict], user_pk: str):
         """Save a list of following to the database."""
@@ -532,64 +566,28 @@ class InstagramDataManager:
         except Exception as e:
             logger.error(f"Error filling missing reels_selected_list: {e}")
 
-    def add_new_usernames_from_csv(self):
-        """Add only new usernames from the CSV file to the database, without syncing or removing any existing entries."""
+    def filter_reels_by_status(self, reel_pks: List[str]) -> set:
+        """
+        Given a list of reel PKs, returns a set of PKs that are already
+        downloaded or marked as unavailable.
+        """
+        if not reel_pks:
+            return set()
         try:
-            csv_usernames = self.read_csv_data()
-            if not csv_usernames:
-                logger.warning("No usernames found in CSV file")
-                return
-
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT username FROM instagram_accounts")
-                existing_usernames = {row[0] for row in cursor.fetchall()}
-
-                # Filter out empty strings and users that already exist.
-                new_usernames = [
-                    (user,) for user in csv_usernames 
-                    if user and user not in existing_usernames
-                ]
-
-                if new_usernames:
-                    cursor.executemany(
-                        "INSERT OR IGNORE INTO instagram_accounts (username) VALUES (?)",
-                        new_usernames
-                    )
-                    logger.info(f"Added {len(new_usernames)} new usernames from CSV to the database.")
-                else:
-                    logger.info("No new usernames to add from CSV.")
+                placeholders = ','.join('?' for _ in reel_pks)
+                query = f"""
+                    SELECT pk FROM reels
+                    WHERE pk IN ({placeholders})
+                    AND (downloaded = 1 OR video_unavailable = 1)
+                """
+                cursor.execute(query, tuple(reel_pks))
+                reels_to_skip = {row[0] for row in cursor.fetchall()}
+                return reels_to_skip
         except Exception as e:
-            logger.error(f"Error adding new usernames from CSV: {e}")
-
-    def add_new_usernames_from_csv_path(self, csv_path: str):
-        """Add only new usernames from the specified CSV file to the database, without syncing or removing any existing entries."""
-        try:
-            if not os.path.exists(csv_path):
-                logger.warning(f"CSV file {csv_path} not found")
-                return
-            df = pd.read_csv(csv_path, header=None)
-            urls = df[0].drop_duplicates().tolist()
-            usernames = [self.extract_username_from_url(url) for url in urls]
-            usernames = list(dict.fromkeys(usernames))
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT username FROM instagram_accounts")
-                existing_usernames = {row[0] for row in cursor.fetchall()}
-                new_usernames = [
-                    (user,) for user in usernames
-                    if user and user not in existing_usernames
-                ]
-                if new_usernames:
-                    cursor.executemany(
-                        "INSERT OR IGNORE INTO instagram_accounts (username) VALUES (?)",
-                        new_usernames
-                    )
-                    logger.info(f"Added {len(new_usernames)} new usernames from {csv_path} to the database.")
-                else:
-                    logger.info(f"No new usernames to add from {csv_path}.")
-        except Exception as e:
-            logger.error(f"Error adding new usernames from {csv_path}: {e}")
+            logger.error(f"Error filtering reels by status: {e}")
+            return set()
 
     def mark_reel_as_downloaded(self, pk: str):
         """Mark a reel as downloaded by its pk."""
@@ -629,7 +627,21 @@ class InstagramDataManager:
             logger.error(f"Error getting video_url for reel {pk}: {e}")
             return None
 
-    def get_users_with_reels_selected_list(self) -> list:
+    def get_reel_thumbnail_url(self, pk: str) -> Optional[str]:
+        """Get the thumbnail_url for a given reel pk."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT thumbnail_url FROM reels WHERE pk = ?", (pk,))
+                result = cursor.fetchone()
+                if result and result[0]:
+                    return result[0]
+                return None
+        except Exception as e:
+            logger.error(f"Error getting thumbnail_url for reel {pk}: {e}")
+            return None
+
+    def get_all_selected_reels(self):
         """Return a list of (username, reels_selected_list) for all users with non-empty reels_selected_list."""
         try:
             with sqlite3.connect(self.db_path) as conn:
@@ -638,6 +650,44 @@ class InstagramDataManager:
                 return cursor.fetchall()
         except Exception as e:
             logger.error(f"Error fetching users with reels_selected_list: {e}")
+            return []
+
+    def get_all_selected_reel_pks(self) -> List[str]:
+        """Get all unique reel PKs from all users' reels_selected_list."""
+        users = self.get_all_selected_reels()
+        all_pks = set()
+        for _, reels_selected_list in users:
+            try:
+                pks = json.loads(reels_selected_list)
+                if isinstance(pks, list):
+                    all_pks.update(pks)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return list(all_pks)
+
+    def get_reels_for_music_analysis(self, reel_pks: List[str]) -> List[str]:
+        """
+        Given a list of reel PKs, returns a list of PKs that need music analysis
+        (no audio_type and no_audio flag is not set to 1).
+        """
+        if not reel_pks:
+            return []
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                placeholders = ','.join('?' for _ in reel_pks)
+                query = f"""
+                    SELECT pk FROM reels
+                    WHERE pk IN ({placeholders})
+                    AND (audio_type IS NULL OR audio_type = '')
+                    AND (no_audio = 0 OR no_audio IS NULL)
+                """
+                cursor.execute(query, tuple(reel_pks))
+                reels_to_process = [row[0] for row in cursor.fetchall()]
+                logger.info(f"Found {len(reels_to_process)} reels requiring music analysis out of {len(reel_pks)} candidates.")
+                return reels_to_process
+        except Exception as e:
+            logger.error(f"Error filtering reels for music analysis: {e}")
             return []
 
     def mark_reel_as_unavailable(self, pk: str):
@@ -669,10 +719,6 @@ class InstagramDataManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(reels)")
-                columns = [row[1] for row in cursor.fetchall()]
-                if 'no_audio' not in columns:
-                    cursor.execute("ALTER TABLE reels ADD COLUMN no_audio INTEGER DEFAULT 0")
                 cursor.execute("UPDATE reels SET no_audio = 1 WHERE pk = ?", (pk,))
                 conn.commit()
                 logger.info(f"Set no_audio flag for reel {pk}.")
@@ -680,34 +726,17 @@ class InstagramDataManager:
             logger.error(f"Error setting no_audio flag for reel {pk}: {e}")
             raise
 
-    def set_audio_info(self, pk: str, audio_type: str, audio_content: str = None):
+    def set_audio_info(self, pk: str, audio_type: str, audio_content: Optional[str] = None):
         """Set the audio_type and audio_content fields for a reel by pk. Adds columns if they don't exist."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(reels)")
-                columns = [row[1] for row in cursor.fetchall()]
-                if 'audio_type' not in columns:
-                    cursor.execute("ALTER TABLE reels ADD COLUMN audio_type TEXT")
-                if 'audio_content' not in columns:
-                    cursor.execute("ALTER TABLE reels ADD COLUMN audio_content TEXT")
                 cursor.execute("UPDATE reels SET audio_type = ?, audio_content = ? WHERE pk = ?", (audio_type, audio_content, pk))
                 conn.commit()
                 logger.info(f"Set audio_type={audio_type}, audio_content={audio_content} for reel {pk}.")
         except Exception as e:
             logger.error(f"Error setting audio info for reel {pk}: {e}")
             raise
-
-    def get_all_selected_reels(self):
-        """Return a list of (username, reels_selected_list) for all users with non-empty reels_selected_list."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT username, reels_selected_list FROM instagram_accounts WHERE reels_selected_list IS NOT NULL AND reels_selected_list != ''")
-                return cursor.fetchall()
-        except Exception as e:
-            logger.error(f"Error fetching users with reels_selected_list: {e}")
-            return []
 
     def set_caption_english(self, pk: str, caption_english: str):
         """Set the caption_english field for a reel by pk. Adds the column if it doesn't exist."""
@@ -726,7 +755,7 @@ class InstagramDataManager:
             raise
 
     def get_selected_reels_with_captions(self):
-        """Return a list of (pk, caption) for all reels in selected_reels lists of all users."""
+        """Return a list of (pk, caption, caption_english) for all reels in selected_reels lists of all users."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -735,13 +764,14 @@ class InstagramDataManager:
                 for (reels_selected_list,) in cursor.fetchall():
                     try:
                         pks = json.loads(reels_selected_list)
-                        all_pks.update(pks)
+                        if isinstance(pks, list):
+                            all_pks.update(pks)
                     except Exception:
                         continue
                 if not all_pks:
                     return []
                 placeholders = ','.join('?' for _ in all_pks)
-                cursor.execute(f"SELECT pk, caption FROM reels WHERE pk IN ({placeholders})", tuple(all_pks))
+                cursor.execute(f"SELECT pk, caption, caption_english FROM reels WHERE pk IN ({placeholders})", tuple(all_pks))
                 return cursor.fetchall()
         except Exception as e:
             logger.error(f"Error fetching selected reels with captions: {e}")
@@ -775,19 +805,8 @@ class InstagramDataManager:
             return []
 
     def add_followed_creators_with_reels_selected_list_column(self):
-        """Add the 'followed_creators_with_reels_selected_list' column to instagram_accounts if it doesn't exist."""
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute("PRAGMA table_info(instagram_accounts)")
-                columns = [row[1] for row in cursor.fetchall()]
-                if 'followed_creators_with_reels_selected_list' not in columns:
-                    cursor.execute("ALTER TABLE instagram_accounts ADD COLUMN followed_creators_with_reels_selected_list TEXT")
-                    conn.commit()
-                    logger.info("Added 'followed_creators_with_reels_selected_list' column to instagram_accounts table.")
-        except Exception as e:
-            logger.error(f"Error adding column followed_creators_with_reels_selected_list: {e}")
-            raise
+        """Column is now created in init_database. This function is for backward compatibility."""
+        pass
 
     def update_followed_creators_with_reels_selected_list(self, insta_id: str, followed_list_json: str):
         """Update the followed_creators_with_reels_selected_list field for a user by insta_id."""
@@ -802,4 +821,404 @@ class InstagramDataManager:
                 logger.info(f"Updated followed_creators_with_reels_selected_list for insta_id {insta_id}.")
         except Exception as e:
             logger.error(f"Error updating followed_creators_with_reels_selected_list for insta_id {insta_id}: {e}")
-            raise 
+            raise
+
+    def get_speech_reels_to_process(self, batch_size: int = 10) -> List[Tuple[str, str]]:
+        """Get reels with audio_type 'speech' that need processing."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT pk, video_url FROM reels 
+                    WHERE audio_type = 'speech' 
+                    AND (audio_content IS NULL OR audio_content = '')
+                    AND video_unavailable = 0
+                    LIMIT ?
+                """, (batch_size,))
+                reels = cursor.fetchall()
+                logger.info(f"Found {len(reels)} reels with speech to process")
+                return reels
+        except Exception as e:
+            logger.error(f"Error getting speech reels to process: {e}")
+            return []
+
+    def get_speech_processing_stats(self) -> dict:
+        """Get statistics about speech processing."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Count reels by audio_type
+                cursor.execute("""
+                    SELECT audio_type, COUNT(*) as count 
+                    FROM reels 
+                    WHERE audio_type IS NOT NULL 
+                    GROUP BY audio_type
+                """)
+                audio_type_stats = cursor.fetchall()
+                
+                # Count reels with no_audio flag
+                cursor.execute("SELECT COUNT(*) FROM reels WHERE no_audio = 1")
+                no_audio_count = cursor.fetchone()[0]
+                
+                # Count reels with speech content
+                cursor.execute("SELECT COUNT(*) FROM reels WHERE audio_type = 'speech' AND audio_content IS NOT NULL AND audio_content != ''")
+                speech_with_content = cursor.fetchone()[0]
+                
+                # Count reels with speech but no content (pending processing)
+                cursor.execute("SELECT COUNT(*) FROM reels WHERE audio_type = 'speech' AND (audio_content IS NULL OR audio_content = '')")
+                speech_pending = cursor.fetchone()[0]
+                
+                stats = {
+                    'no_audio_count': no_audio_count,
+                    'speech_with_content': speech_with_content,
+                    'speech_pending': speech_pending,
+                    'audio_type_stats': audio_type_stats
+                }
+                
+                logger.info("=== Speech Processing Statistics ===")
+                logger.info(f"Reels with no_audio flag: {no_audio_count}")
+                logger.info(f"Reels with speech content: {speech_with_content}")
+                logger.info(f"Reels with speech pending processing: {speech_pending}")
+                
+                for audio_type, count in audio_type_stats:
+                    logger.info(f"Reels with audio_type '{audio_type}': {count}")
+                
+                return stats
+                
+        except Exception as e:
+            logger.error(f"Error getting speech processing stats: {e}")
+            return {}
+
+    def mark_reel_as_no_audio_and_clear_type(self, pk: str):
+        """Mark a reel as no_audio and clear the audio_type."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE reels SET no_audio = 1, audio_type = '' WHERE pk = ?", (pk,))
+                conn.commit()
+                logger.info(f"Marked reel {pk} as no_audio and cleared audio_type")
+        except Exception as e:
+            logger.error(f"Error marking reel {pk} as no_audio: {e}")
+            raise
+
+    def get_reel_info(self, reel_id: str) -> Optional[dict]:
+        """Get complete reel information by ID for video processing."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT pk, user_pk, code, caption, caption_english, caption_english_short,
+                           audio_type, audio_content, audio_content_short, video_url
+                    FROM reels 
+                    WHERE pk = ?
+                """, (reel_id,))
+                
+                row = cursor.fetchone()
+                if not row:
+                    logger.warning(f"Reel with ID {reel_id} not found in database")
+                    return None
+                
+                return dict(row)
+        except Exception as e:
+            logger.error(f"Error getting reel info for {reel_id}: {e}")
+            return None
+
+    def get_selected_reels_list(self) -> List[str]:
+        """Get the list of selected reel IDs from ALL users in instagram_accounts table."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT reels_selected_list FROM instagram_accounts WHERE reels_selected_list IS NOT NULL AND reels_selected_list != ''")
+                rows = cursor.fetchall()
+                
+                all_reels = []
+                for row in rows:
+                    if row[0]:
+                        try:
+                            user_reels = json.loads(row[0])
+                            if isinstance(user_reels, list):
+                                all_reels.extend(user_reels)
+                        except json.JSONDecodeError:
+                            logger.error("Failed to parse reels_selected_list JSON")
+                            continue
+                
+                unique_reels = list(set(all_reels))
+                logger.info(f"Found {len(unique_reels)} unique reels from {len(rows)} users")
+                return unique_reels
+        except Exception as e:
+            logger.error(f"Error getting selected reels list: {e}")
+            return []
+
+    def get_reels_without_description(self, reel_ids: List[str]) -> List[str]:
+        """Get reel IDs that don't have model_description_text yet."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                placeholders = ','.join(['?' for _ in reel_ids])
+                cursor.execute(f"""
+                    SELECT pk FROM reels 
+                    WHERE pk IN ({placeholders})
+                    AND (model_description_text IS NULL OR model_description_text = '')
+                """, reel_ids)
+                return [row[0] for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting reels without description: {e}")
+            return []
+
+    def set_model_description(self, pk: str, description: str):
+        """Set the model_description_text field for a reel by pk."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE reels SET model_description_text = ? WHERE pk = ?", (description, pk))
+                conn.commit()
+                logger.info(f"Set model_description_text for reel {pk}")
+        except Exception as e:
+            logger.error(f"Error setting model_description_text for reel {pk}: {e}")
+            raise
+
+    def ensure_embeddings_column(self):
+        """Column is now created in init_database. This function is for backward compatibility."""
+        pass
+
+    def get_reels_for_embedding_generation(self) -> List[Tuple[str, str]]:
+        """Get reels that need embedding generation (have descriptions but no embeddings)."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT pk, 
+                           COALESCE(model_description_processed, model_description_text) as description
+                    FROM reels 
+                    WHERE ((model_description_processed IS NOT NULL AND model_description_processed != '')
+                       OR (model_description_text IS NOT NULL AND model_description_text != ''))
+                    AND (model_description_embeddings IS NULL OR model_description_embeddings = '')
+                """)
+                
+                reels = cursor.fetchall()
+                logger.info(f"Found {len(reels)} reels needing embedding generation")
+                return reels
+        except Exception as e:
+            logger.error(f"Error getting reels for embedding generation: {e}")
+            return []
+
+    def save_embedding(self, pk: str, embedding_blob: bytes):
+        """Save embedding blob for a reel by pk."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE reels SET model_description_embeddings = ? WHERE pk = ?", (embedding_blob, pk))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving embedding for reel {pk}: {e}")
+            raise
+
+    def ensure_processed_column(self):
+        """Column is now created in init_database. This function is for backward compatibility."""
+        pass
+
+    def get_reels_for_processing(self) -> List[Tuple[str, str]]:
+        """Get reels that need processing (have model_description_text but no model_description_processed)."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT pk, model_description_text 
+                    FROM reels 
+                    WHERE model_description_text IS NOT NULL 
+                    AND model_description_text != ''
+                    AND (model_description_processed IS NULL OR model_description_processed = '')
+                """)
+                
+                reels = cursor.fetchall()
+                logger.info(f"Found {len(reels)} reels needing processing")
+                return reels
+        except Exception as e:
+            logger.error(f"Error getting reels for processing: {e}")
+            return []
+
+    def save_processed_description(self, pk: str, processed_description: str):
+        """Save processed description for a reel by pk."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE reels SET model_description_processed = ? WHERE pk = ?", (processed_description, pk))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving processed description for reel {pk}: {e}")
+            raise
+
+    def get_creator_profiles(self) -> Tuple[dict, dict]:
+        """Get creator profiles by aggregating reels into creator profiles by averaging their embeddings."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT user_pk, pk, model_description_embeddings
+                    FROM reels 
+                    WHERE model_description_embeddings IS NOT NULL 
+                    AND model_description_embeddings != ''
+                    AND user_pk IS NOT NULL
+                    ORDER BY user_pk
+                """)
+                
+                reels_data = cursor.fetchall()
+                logger.info(f"Found {len(reels_data)} reels with embeddings")
+                
+                creator_reels = defaultdict(list)
+                for user_pk, reel_pk, embedding_blob in reels_data:
+                    embedding = self._load_embedding_from_blob(embedding_blob)
+                    if embedding is not None:
+                        creator_reels[user_pk].append((reel_pk, embedding))
+                
+                logger.info(f"Found {len(creator_reels)} creators with embeddings")
+                
+                creator_profiles = {}
+                creator_stats = {}
+                
+                for user_pk, reels in creator_reels.items():
+                    if len(reels) < 1:
+                        continue
+                    
+                    embeddings = [embedding for _, embedding in reels]
+                    reel_pks = [pk for pk, _ in reels]
+                    
+                    avg_embedding = np.mean(embeddings, axis=0)
+                    
+                    creator_profiles[user_pk] = avg_embedding
+                    creator_stats[user_pk] = {
+                        'reel_count': len(reels),
+                        'reel_pks': reel_pks
+                    }
+                
+                logger.info(f"Created profiles for {len(creator_profiles)} creators")
+                return creator_profiles, creator_stats
+                
+        except Exception as e:
+            logger.error(f"Error getting creator profiles: {e}")
+            raise
+
+    def _load_embedding_from_blob(self, blob_data):
+        """Convert blob data back to numpy array"""
+        if blob_data is None:
+            return None
+        try:
+            embedding_array = np.frombuffer(blob_data, dtype=np.float32)
+            return embedding_array.reshape(1, -1)
+        except Exception as e:
+            logger.error(f"Error loading embedding from blob: {e}")
+            return None
+
+    def ensure_clustering_columns(self):
+        """Columns are now created in init_database. This function is for backward compatibility."""
+        pass
+
+    def save_clustering_results(self, kmeans_results: Optional[dict] = None, hdbscan_results: Optional[dict] = None):
+        """Save clustering results to the instagram_accounts table."""
+        try:
+            self.ensure_clustering_columns()
+            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                if kmeans_results:
+                    for user_pk, data in kmeans_results.items():
+                        cluster_id = data['cluster']
+                        cursor.execute("UPDATE instagram_accounts SET kmeans_cluster = ? WHERE insta_id = ?", (cluster_id, user_pk))
+                    logger.info(f"Saved K-means clustering results for {len(kmeans_results)} creators")
+                
+                if hdbscan_results:
+                    for user_pk, data in hdbscan_results.items():
+                        cluster_id = data['cluster']
+                        is_noise = 1 if data['is_noise'] else 0
+                        cursor.execute("UPDATE instagram_accounts SET hdbscan_cluster = ?, is_noise_point = ? WHERE insta_id = ?", (cluster_id, is_noise, user_pk))
+                    logger.info(f"Saved HDBSCAN clustering results for {len(hdbscan_results)} creators")
+                
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error saving clustering results: {e}")
+            raise
+
+    def save_umap_coordinates(self, creator_coordinates: dict):
+        """Save UMAP coordinates for creators to the instagram_accounts table."""
+        try:
+            self.ensure_clustering_columns()
+            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                for user_pk, coordinates in creator_coordinates.items():
+                    x, y = coordinates
+                    cursor.execute("UPDATE instagram_accounts SET umap_x = ?, umap_y = ? WHERE insta_id = ?", (float(x), float(y), user_pk))
+                
+                conn.commit()
+                logger.info(f"Saved UMAP coordinates for {len(creator_coordinates)} creators")
+        except Exception as e:
+            logger.error(f"Error saving UMAP coordinates: {e}")
+            raise
+
+    def get_umap_coordinates(self) -> dict:
+        """Get UMAP coordinates for all creators from the instagram_accounts table."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("SELECT insta_id, umap_x, umap_y FROM instagram_accounts WHERE umap_x IS NOT NULL AND umap_y IS NOT NULL AND insta_id IS NOT NULL")
+                
+                coordinates = {insta_id: (x, y) for insta_id, x, y in cursor.fetchall()}
+                
+                logger.info(f"Retrieved UMAP coordinates for {len(coordinates)} creators")
+                return coordinates
+        except Exception as e:
+            logger.error(f"Error getting UMAP coordinates: {e}")
+            return {}
+
+    def get_clustering_stats(self) -> dict:
+        """Get statistics about clustering results from instagram_accounts table."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("SELECT kmeans_cluster, COUNT(*) as count FROM instagram_accounts WHERE kmeans_cluster IS NOT NULL GROUP BY kmeans_cluster ORDER BY kmeans_cluster")
+                kmeans_stats = cursor.fetchall()
+                
+                cursor.execute("SELECT hdbscan_cluster, COUNT(*) as count FROM instagram_accounts WHERE hdbscan_cluster IS NOT NULL GROUP BY hdbscan_cluster ORDER BY hdbscan_cluster")
+                hdbscan_stats = cursor.fetchall()
+                
+                cursor.execute("SELECT COUNT(*) FROM instagram_accounts WHERE is_noise_point = 1")
+                noise_count = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM instagram_accounts WHERE kmeans_cluster IS NOT NULL")
+                creators_with_kmeans = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(*) FROM instagram_accounts WHERE hdbscan_cluster IS NOT NULL")
+                creators_with_hdbscan = cursor.fetchone()[0]
+                
+                stats = {
+                    'kmeans_stats': kmeans_stats,
+                    'hdbscan_stats': hdbscan_stats,
+                    'noise_count': noise_count,
+                    'creators_with_kmeans': creators_with_kmeans,
+                    'creators_with_hdbscan': creators_with_hdbscan
+                }
+                
+                logger.info("=== Clustering Statistics ===")
+                logger.info(f"Creators with K-means clustering: {creators_with_kmeans}")
+                logger.info(f"Creators with HDBSCAN clustering: {creators_with_hdbscan}")
+                logger.info(f"Noise points: {noise_count}")
+                
+                logger.info("K-means cluster sizes:")
+                for cluster_id, count in kmeans_stats:
+                    logger.info(f"  Cluster {cluster_id}: {count} creators")
+                
+                logger.info("HDBSCAN cluster sizes:")
+                for cluster_id, count in hdbscan_stats:
+                    logger.info(f"  Cluster {cluster_id if cluster_id != -1 else 'Noise'}: {count} creators")
+                
+                return stats
+        except Exception as e:
+            logger.error(f"Error getting clustering stats: {e}")
+            return {} 

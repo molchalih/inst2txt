@@ -12,12 +12,51 @@ import httpx
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def download_avatar(username: str, insta_id: str, profile_pic_url: str, max_retries: int = 3, delay: int = 3):
+    """
+    Downloads a user's avatar with retries.
+    """
+    if not profile_pic_url:
+        logger.warning(f"No profile_pic_url for {username}, skipping avatar download.")
+        return
+    if not insta_id:
+        logger.warning(f"No insta_id for {username}, cannot save avatar.")
+        return
+
+    avatar_dir = "data/avatars"
+    os.makedirs(avatar_dir, exist_ok=True)
+    avatar_path = os.path.join(avatar_dir, f"{insta_id}.jpg")
+
+    if os.path.exists(avatar_path):
+        return
+
+    for attempt in range(max_retries):
+        try:
+            with httpx.stream("GET", profile_pic_url, timeout=20) as response:
+                response.raise_for_status()
+                with open(avatar_path, "wb") as f:
+                    for chunk in response.iter_bytes():
+                        f.write(chunk)
+                logger.info(f"Successfully downloaded avatar for {username} (ID: {insta_id}) to {avatar_path}")
+                return
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Failed to download avatar for {username} (ID: {insta_id}). Status: {e.response.status_code}. Attempt {attempt + 1}/{max_retries}.")
+        except httpx.RequestError as e:
+            logger.error(f"Network error downloading avatar for {username} (ID: {insta_id}): {e}. Attempt {attempt + 1}/{max_retries}.")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during avatar download for {username} (ID: {insta_id}): {e}. Attempt {attempt + 1}/{max_retries}.")
+
+        if attempt < max_retries - 1:
+            logger.info(f"Retrying in {delay} seconds...")
+            time.sleep(delay)
+    
+    logger.error(f"Failed to download avatar for {username} (ID: {insta_id}) after {max_retries} attempts.")
+
 def fetch_user_with_retry(username, cl, data_manager, max_retries=5):
     attempts = 0
     while attempts < max_retries:
         try:
             response = cl.user_by_username_v2(username)
-            status_code = getattr(response, 'status_code', None)
             # Improved user not found check
             user_not_found = (
                 not response or
@@ -72,6 +111,7 @@ def process_user_with_hiker(
         pk = str(user.get("pk"))
         following_count = user.get("following_count", 0)
         followers_count = user.get("follower_count", 0)
+        profile_pic_url = str(user.get("profile_pic_url", ""))
         
         # Upsert user info right away
         data_manager.upsert_account(
@@ -81,10 +121,13 @@ def process_user_with_hiker(
             following_count=following_count,
             full_name=user.get("full_name", ""),
             url=f"https://www.instagram.com/{user.get('username', '')}/",
-            profile_pic_url=str(user.get("profile_pic_url", "")),
+            profile_pic_url=profile_pic_url,
             biography=user.get("biography", "")
         )
         logger.info(f"Upserted user info for {username}")
+
+        # Download avatar if it doesn't exist
+        download_avatar(username, pk, profile_pic_url)
 
         # Check for high following count first
         if following_count > max_following or followers_count < min_followers:
@@ -107,8 +150,8 @@ def process_user_with_hiker(
                         break
                     except httpx.RequestError as e:
                         attempts += 1
-                        logger.error(f"Network error fetching reels for {username}: {e}. Attempt {attempts}/{max_retries}. Retrying in 30s...")
-                        time.sleep(30)
+                        logger.error(f"Network error fetching reels for {username}: {e}. Attempt {attempts}/{max_retries}. Retrying in 5s...")
+                        time.sleep(5)
                 else:
                     logger.error(f"Failed to fetch reels for {username} after {max_retries} attempts. Skipping user.")
                     return
@@ -225,34 +268,38 @@ def main():
     hiker_client = Client(token=HIKER_API_TOKEN)
     data_manager = InstagramDataManager()
 
-    # Add only new usernames from data/new.csv to the database
-    data_manager.add_new_usernames_from_csv_path('data/new.csv')
-
-    # Fill missing reels_selected_list for users with reels but no selected reels
-    data_manager.fill_missing_reels_selected_list(top_n=5)
-
-    usernames = data_manager.get_database_usernames()
-    if not usernames:
-        logger.warning("No usernames found in the database.")
+    users_with_status = data_manager.get_hiker_processing_status_for_all_users()
+    if not users_with_status:
+        logger.warning("No users found in the database.")
         return
         
-    logger.info(f"Found {len(usernames)} users to process with Hiker API.")
-    reels_to_fetch = 60
-    max_following = 1001
-    min_followers = 10000
+    logger.info(f"Found {len(users_with_status)} users to evaluate with Hiker API.")
 
-    for username in usernames:
-        # Check statuses
-        existing_reels_count, all_reels_fetched = data_manager.get_user_hiker_status(username)
-        all_following_fetched = data_manager.get_user_following_hiker_status(username)
+    # Load policy variables from .env or use defaults
+    reels_to_fetch = int(os.getenv("POLICY_REELS_TO_FETCH", 60))
+    max_following = int(os.getenv("POLICY_MAX_FOLLOWING", 1001))
+    min_followers = int(os.getenv("POLICY_MIN_FOLLOWERS", 10000))
 
-        reels_done = all_reels_fetched or (existing_reels_count >= reels_to_fetch)
-        following_done = all_following_fetched
+    users_to_process = []
+    for username, _insta_id, all_reels_fetched, all_following_fetched, _ in users_with_status:
+        reels_done = bool(all_reels_fetched)
+        following_done = bool(all_following_fetched)
 
-        if reels_done and following_done:
-            logger.info(f"User {username} is fully processed for both reels and following. Skipping.")
-            continue
+        if not (reels_done and following_done):
+            users_to_process.append({
+                "username": username, 
+                "reels_done": reels_done, 
+                "following_done": following_done
+            })
+    
+    total_users = len(users_with_status)
+    logger.info(f"Filtered down to {len(users_to_process)} users needing processing out of {total_users} total.")
 
+    for user_data in users_to_process:
+        username = user_data["username"]
+        reels_done = user_data["reels_done"]
+        following_done = user_data["following_done"]
+        
         process_user_with_hiker(
             username,
             hiker_client,
@@ -264,9 +311,13 @@ def main():
             min_followers=min_followers
         )
         # Add a small delay to be respectful to the API
-        sleep_time = random.uniform(0.1, 0.2)  # Using uniform for floating point numbers
-        logger.info(f"Waiting for {sleep_time} seconds...")
+        sleep_time = random.uniform(0.1, 0.2)
+        logger.info(f"Waiting for {sleep_time:.2f} seconds...")
         time.sleep(sleep_time)
+
+    # Fill missing reels_selected_list for any users who might have been missed.
+    logger.info("Running a final check to fill any missing selected reels lists...")
+    data_manager.fill_missing_reels_selected_list(top_n=5)
 
 if __name__ == "__main__":
     main()

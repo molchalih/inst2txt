@@ -186,9 +186,15 @@ session.json
 
 *.db
 *.db-journal
+*.backup
+
+*.backup*
 
 *.mp4
 *.mp3
 *.csv
 
 .cursorignore
+
+Llama-3.1-8B-Instruct/*
+llava-processor/*
