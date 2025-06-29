@@ -174,5 +174,19 @@ cython_debug/
 .pypirc
 
 bots.json
+bot.json
 sessions/
 session.json
+
+.env
+
+.cursorignore
+.cursorrules
+.cursorignore
+
+*.db
+*.db-journal
+
+*.mp4
+*.mp3
+*.csv

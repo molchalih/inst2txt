@@ -1,2 +1,11 @@
-pandas>=1.5.0
-sqlite3 
+httpx==0.27.0
+instagrapi==2.1.0
+pandas==2.2.2
+python-dotenv==1.0.1
+aiohttp
+hikerapi
+acrcloud
+pydub
+langdetect
+argostranslate
+moviepy 
