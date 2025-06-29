@@ -1,0 +1,41 @@
+# Git and Python
+.git/
+.idea/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# Docker
+.dockerignore
+Dockerfile
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+
+# Local data and models (should be mounted as volumes)
+data/reels/
+data/audio/
+data/avatars/
+data/thumbnails/
+data/*.db
+data/*.db-journal*
+data/*.backup*
+model_cache/
+llava-processor/
+sessions/
+
+# Output files
+*.png
+*.log
+
+# Environment files
+.env
+local_settings.py 
+
+Llama-3.1-8B-Instruct/
+llava-processor/

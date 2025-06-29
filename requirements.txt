@@ -8,4 +8,5 @@ acrcloud
 pydub
 langdetect
 argostranslate
-moviepy 
+moviepy
+scipy 
