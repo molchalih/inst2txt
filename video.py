@@ -10,6 +10,10 @@ from transformers import LlavaNextVideoProcessor, LlavaNextVideoForConditionalGe
 from transformers.utils.quantization_config import BitsAndBytesConfig
 from db_manager import InstagramDataManager
 
+# --- Path Configuration ---
+# Get the absolute path to the directory containing this script (the project root).
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 # Global variables to hold the model and processor, initialized to None
 model = None
 processor = None
@@ -26,8 +30,9 @@ def load_video_model():
         start_time = time.time()
         
         model_id = "llava-hf/LLaVA-NeXT-Video-7B-DPO-hf"
-        model_cache_dir = "./model_cache"
-        processor_path = "./llava-processor"
+        # Use absolute paths to prevent issues with the current working directory
+        model_cache_dir = os.path.join(_PROJECT_ROOT, "model_cache")
+        processor_path = os.path.join(_PROJECT_ROOT, "llava-processor")
 
         # Step 1: Download the entire model snapshot if it's not already cached.
         # This gives us the local path to all model and processor files.
@@ -295,8 +300,8 @@ def process_single_reel(reel_id, db_manager):
     
     print(f"Found reel: {reel_info['code']}")
     
-    # Check if video file exists
-    video_path = f"data/reels/{reel_id}.mp4"
+    # Check if video file exists using an absolute path
+    video_path = os.path.join(_PROJECT_ROOT, "data", "reels", f"{reel_id}.mp4")
     if not os.path.exists(video_path):
         print(f"Video file not found: {video_path}, skipping...")
         return False

@@ -972,7 +972,10 @@ class InstagramDataManager:
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("UPDATE reels SET model_description_text = ? WHERE pk = ?", (description, pk))
+                cursor.execute(
+                    "UPDATE reels SET model_description_text = ? WHERE pk = ?",
+                    (description, pk)
+                )
                 conn.commit()
                 logger.info(f"Set model_description_text for reel {pk}")
         except Exception as e:
@@ -1020,20 +1023,18 @@ class InstagramDataManager:
         pass
 
     def get_reels_for_processing(self) -> List[Tuple[str, str]]:
-        """Get reels that need processing (have model_description_text but no model_description_processed)."""
+        """Get reels that have a model description but no processed description yet."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT pk, model_description_text 
-                    FROM reels 
+                    SELECT pk, model_description_text
+                    FROM reels
                     WHERE model_description_text IS NOT NULL 
-                    AND model_description_text != ''
-                    AND (model_description_processed IS NULL OR model_description_processed = '')
+                      AND (model_description_processed IS NULL OR model_description_processed = '')
                 """)
-                
                 reels = cursor.fetchall()
-                logger.info(f"Found {len(reels)} reels needing processing")
+                logger.info(f"Found {len(reels)} reels for processing")
                 return reels
         except Exception as e:
             logger.error(f"Error getting reels for processing: {e}")

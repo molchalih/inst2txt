@@ -3,6 +3,7 @@ from torch.nn.functional import cosine_similarity
 import torch
 import torch.nn.functional as F
 import numpy as np
+from tqdm import tqdm
 from db_manager import InstagramDataManager
 
 #Mean Pooling - Take attention mask into account for correct averaging
@@ -26,18 +27,24 @@ def generate_embeddings_for_reels():
     tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-mpnet-base-v2')
     model = AutoModel.from_pretrained('sentence-transformers/all-mpnet-base-v2')
     
-    # Get reels that need embedding generation
-    reels = db_manager.get_reels_for_embedding_generation()
+    # Get all reels that have a generated description.
+    all_reels_with_desc = db_manager.get_reels_for_embedding_generation()
     
-    if not reels:
-        print("No reels found needing embedding generation")
+    # Get the specific list of reel PKs that are part of the actual analysis group.
+    selected_reel_pks = db_manager.get_selected_reels_list()
+    selected_reels_set = set(selected_reel_pks)
+    
+    # Filter the reels to only process those that are in our selected group.
+    reels_to_process = [reel for reel in all_reels_with_desc if reel[0] in selected_reels_set]
+    
+    if not reels_to_process:
+        print("No selected reels found needing embedding generation.")
         return
     
-    print(f"Found {len(reels)} reels needing embedding generation")
+    print(f"Found {len(reels_to_process)} selected reels needing embedding generation.")
     
-    processed_count = 0
-    
-    for pk, description in reels:
+    # Process reels with a clean progress bar
+    for pk, description in tqdm(reels_to_process, desc="Generating Embeddings"):
         if not description:
             continue
         
@@ -61,18 +68,13 @@ def generate_embeddings_for_reels():
             
             # Save to database
             db_manager.save_embedding(pk, embedding_blob)
-            processed_count += 1
-            
-            if processed_count % 100 == 0:
-                print(f"Processed {processed_count} reels...")
             
         except Exception as e:
             print(f"Error processing reel {pk}: {e}")
             continue
     
     print("\n=== Embedding Generation Complete ===")
-    print(f"Generated embeddings for {processed_count} reels")
-    print(f"Total processed: {len(reels)}")
+    print(f"Generated embeddings for {len(reels_to_process)} reels.")
 
 if __name__ == "__main__":
     generate_embeddings_for_reels()

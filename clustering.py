@@ -208,7 +208,8 @@ def visualize_clusters(creator_coordinates, clustering_results, n_clusters=5):
     fig, ax = plt.subplots(figsize=(14, 12))
     
     # Define colors for clusters
-    colors = plt.cm.viridis(np.linspace(0, 1, n_clusters))
+    cmap = plt.get_cmap('viridis')
+    colors = cmap(np.linspace(0, 1, n_clusters))
     
     # Plot individual points and add ellipses
     for cluster_id in range(n_clusters):
@@ -259,7 +260,8 @@ def visualize_hdbscan_clusters(creator_coordinates, hdbscan_results):
     
     # Get non-noise cluster IDs
     cluster_ids = sorted(set([label for label in cluster_labels if label != -1]))
-    colors = plt.cm.viridis(np.linspace(0, 1, len(cluster_ids)))
+    cmap = plt.get_cmap('viridis')
+    colors = cmap(np.linspace(0, 1, len(cluster_ids)))
     
     # Plot regular points with cluster colors and add ellipses
     for i, cluster_id in enumerate(cluster_ids):
@@ -371,7 +373,8 @@ def visualize_following_network(creator_coordinates, following_data, clustering_
     if clustering_results:
         # Color nodes by cluster
         cluster_ids = sorted(set([data['cluster'] for data in clustering_results.values() if data['cluster'] != -1]))
-        colors = plt.cm.viridis(np.linspace(0, 1, len(cluster_ids)))
+        cmap = plt.get_cmap('viridis')
+        colors = cmap(np.linspace(0, 1, len(cluster_ids)))
         
         node_colors = []
         for node in G.nodes():
@@ -407,7 +410,8 @@ def visualize_following_network(creator_coordinates, following_data, clustering_
     if clustering_results:
         legend_elements = []
         cluster_ids = sorted(set([data['cluster'] for data in clustering_results.values() if data['cluster'] != -1]))
-        colors = plt.cm.viridis(np.linspace(0, 1, len(cluster_ids)))
+        cmap = plt.get_cmap('viridis')
+        colors = cmap(np.linspace(0, 1, len(cluster_ids)))
         
         for i, cluster_id in enumerate(cluster_ids):
             legend_elements.append(mlines.Line2D([0], [0], marker='o', color='w', 
@@ -435,7 +439,7 @@ def visualize_following_network(creator_coordinates, following_data, clustering_
     # Calculate average degree
     degrees = dict(G.degree())
     if degrees:
-        avg_degree = sum(degrees.values()) / len(degrees)
+        avg_degree = sum(d for n, d in G.degree()) / G.number_of_nodes()
         print(f"Average degree: {avg_degree:.2f}")
     
     # Find most connected creators

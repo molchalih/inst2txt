@@ -1,27 +1,54 @@
 import re
 from db_manager import InstagramDataManager
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 def clean_video_descriptions():
-    """Clean up model_description_text by removing 'the video' mentions and save to new field"""
-    print("=== Starting Description Cleanup ===")
+    """
+    Clean up model_description_text by removing model-generated prefixes and mentions
+    of "video", then saves the result to model_description_processed.
+    """
+    logger.info("=== Starting Description Cleanup ===")
     
-    # Initialize database manager
     db_manager = InstagramDataManager()
-    
-    # Ensure processed column exists
-    db_manager.ensure_processed_column()
-    
-    # Get reels that need processing
     reels = db_manager.get_reels_for_processing()
     
     if not reels:
-        print("No reels found needing processing")
+        logger.info("No reels found needing processing.")
         return
     
-    print(f"Found {len(reels)} reels with descriptions to process")
+    logger.info(f"Found {len(reels)} reels with descriptions to process.")
+    
+    # A list of regex patterns for common model-generated prefixes.
+    # They are case-insensitive and anchored to the start of the string.
+    prefix_patterns = [
+        re.compile(r"^\s*the aesthetic of this video is characterized by\s*", re.IGNORECASE),
+        re.compile(r"^\s*the aesthetic of the video is characterized by\s*", re.IGNORECASE),
+        re.compile(r"^\s*the aesthetic of this video is\s*", re.IGNORECASE),
+        re.compile(r"^\s*this video'?s aesthetic is\s*", re.IGNORECASE),
+        re.compile(r"^\s*the video'?s aesthetic is\s*", re.IGNORECASE),
+        re.compile(r"^\s*this video is about\s*", re.IGNORECASE),
+        re.compile(r"^\s*the video is about\s*", re.IGNORECASE),
+        re.compile(r"^\s*this video showcases\s*", re.IGNORECASE),
+        re.compile(r"^\s*the video showcases\s*", re.IGNORECASE),
+        re.compile(r"^\s*this video features\s*", re.IGNORECASE),
+        re.compile(r"^\s*the video features\s*", re.IGNORECASE),
+        re.compile(r"^\s*this video portrays\s*", re.IGNORECASE),
+        re.compile(r"^\s*the video portrays\s*", re.IGNORECASE),
+    ]
+
+    # A list of general words/phrases to remove globally from the entire text.
+    general_patterns = [
+        re.compile(r"\b(of|in|for|from)\s+(this|the)\s+video\b", re.IGNORECASE),
+        re.compile(r"\b(this|the)\s+video'?s\b", re.IGNORECASE),
+        re.compile(r"\b(this|the)\s+video\b", re.IGNORECASE),
+        re.compile(r"\bvideo\b", re.IGNORECASE),
+    ]
     
     processed_count = 0
-    
     for pk, description in reels:
         if not description:
             continue
@@ -29,35 +56,36 @@ def clean_video_descriptions():
         original = description
         cleaned = description
         
-        # Remove "of this video" from anywhere in the text (case insensitive)
-        cleaned = re.sub(r'\bof this video\b', '', cleaned, flags=re.IGNORECASE)
+        # Step 1: Remove one of the known prefixes from the start of the string.
+        for pattern in prefix_patterns:
+            # As soon as one prefix matches and is removed, we stop.
+            new_cleaned, num_subs = pattern.subn('', cleaned, count=1)
+            if num_subs > 0:
+                cleaned = new_cleaned
+                break
         
-        # Remove "the video" from anywhere in the text (case insensitive)
-        cleaned = re.sub(r'\bthe video\b', '', cleaned, flags=re.IGNORECASE)
-        
-        # Also remove "this video" from anywhere in the text
-        cleaned = re.sub(r'\bthis video\b', '', cleaned, flags=re.IGNORECASE)
-        
-        # Remove "video" from anywhere in the text
-        cleaned = re.sub(r'\bvideo\b', '', cleaned, flags=re.IGNORECASE)
-        
-        # Remove "the video's" from anywhere in the text
-        cleaned = re.sub(r'\bthe video\'s\b', '', cleaned, flags=re.IGNORECASE)
-        
-        # Remove "this video's" from anywhere in the text
-        cleaned = re.sub(r'\bthis video\'s\b', '', cleaned, flags=re.IGNORECASE)
-        
-        # Clean up extra whitespace that might be left
+        # Step 2: Remove general "video" mentions from anywhere in the text.
+        for pattern in general_patterns:
+            cleaned = pattern.sub('', cleaned)
+            
+        # Step 3: Clean up whitespace and fix capitalization.
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        if cleaned:
+            cleaned = cleaned[0].upper() + cleaned[1:]
         
-        # Save the cleaned description to the new field
+        # Step 4: Save the result.
         db_manager.save_processed_description(pk, cleaned)
         processed_count += 1
-        print(f"Processed reel {pk}: '{original[:50]}...' -> '{cleaned[:50]}...'")
-    
-    print("\n=== Processing Complete ===")
-    print(f"Processed {processed_count} descriptions")
-    print(f"Total processed: {len(reels)}")
+        
+        if original != cleaned:
+            logger.info(f"Processed reel {pk}: '{original[:80]}...' -> '{cleaned[:80]}...'")
+        else:
+            # This can happen if no patterns matched. We still save the original
+            # content to the 'processed' field to mark it as done.
+            logger.info(f"Processed reel {pk} (no changes made): '{original[:80]}...'")
+
+    logger.info("\n=== Processing Complete ===")
+    logger.info(f"Processed {processed_count} descriptions.")
 
 if __name__ == "__main__":
     clean_video_descriptions()
