@@ -3,6 +3,8 @@ import torch
 import numpy as np
 import os
 import time
+import shutil
+from huggingface_hub import snapshot_download
 from scenedetect import detect, ContentDetector
 from transformers import LlavaNextVideoProcessor, LlavaNextVideoForConditionalGeneration
 from transformers.utils.quantization_config import BitsAndBytesConfig
@@ -27,40 +29,52 @@ def load_video_model():
         model_cache_dir = "./model_cache"
         processor_path = "./llava-processor"
 
-        # Load model, using a local cache directory
-        # This will download the model to the cache_dir if not already present.
-        print(f"Loading model from {model_id}, using cache at {model_cache_dir}...")
+        # Step 1: Download the entire model snapshot if it's not already cached.
+        # This gives us the local path to all model and processor files.
+        print(f"Ensuring model snapshot for {model_id} is available at {model_cache_dir}...")
+        snapshot_path = snapshot_download(
+            repo_id=model_id,
+            cache_dir=model_cache_dir
+        )
+        print(f"Snapshot is at: {snapshot_path}")
+        
+        # Step 2: If the local processor directory doesn't exist, create it by copying
+        # the necessary files from the downloaded snapshot.
+        if not os.path.isdir(processor_path):
+            print(f"Processor directory not found at {processor_path}. Copying files from snapshot...")
+            os.makedirs(processor_path, exist_ok=True)
+            
+            processor_files = [
+                "added_tokens.json", "chat_template.json", "preprocessor_config.json",
+                "processor_config.json", "special_tokens_map.json", "tokenizer.json",
+                "tokenizer.model", "tokenizer_config.json"
+            ]
+            
+            for filename in processor_files:
+                source_file = os.path.join(snapshot_path, filename)
+                if os.path.exists(source_file):
+                    shutil.copy(source_file, processor_path)
+            
+            print(f"Processor files copied to {processor_path}")
+
+        # Step 3: Load the model from the local snapshot path.
+        print(f"Loading model from local path: {snapshot_path}...")
         model = LlavaNextVideoForConditionalGeneration.from_pretrained(
-            model_id,
-            cache_dir=model_cache_dir,
+            snapshot_path,  # Load from the local directory
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
-            # quantization_config=BitsAndBytesConfig(
-            #     load_in_4bit=True,
-            #     bnb_4bit_compute_dtype=torch.float16,
-            #     bnb_4bit_quant_type="nf4",
-            #     bnb_4bit_use_double_quant=True,
-            # ),
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+            ),
             device_map="auto",
             attn_implementation="flash_attention_2",
         )
         print("Model loaded.")
 
-        # Ensure processor is available locally
-        if not os.path.isdir(processor_path):
-            print(f"Processor not found at {processor_path}, downloading from {model_id}...")
-            # Use from_pretrained to download the processor from the hub
-            downloaded_processor_obj = LlavaNextVideoProcessor.from_pretrained(model_id, use_fast=True)
-            # The return value can be a tuple, so we handle that case
-            if isinstance(downloaded_processor_obj, tuple):
-                processor_to_save = downloaded_processor_obj[0]
-            else:
-                processor_to_save = downloaded_processor_obj
-            # Save it to the desired local path
-            processor_to_save.save_pretrained(processor_path)
-            print(f"Processor saved to {processor_path}")
-
-        # Load processor from the local path
+        # Step 4: Load the processor from our clean, local processor directory.
         processor = LlavaNextVideoProcessor.from_pretrained(processor_path, use_fast=True)
         print("Processor loaded.")
         

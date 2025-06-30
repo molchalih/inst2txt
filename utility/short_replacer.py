@@ -9,7 +9,7 @@ from transformers.utils.quantization_config import BitsAndBytesConfig
 # --- Basic Setup ---
 load_dotenv()
 
-DB_PATH = "data/instagram_database_primary.db"
+DB_PATH = "data/instagram_data.db"
 MODEL_ID = "./Llama-3.1-8B-Instruct"
 
 # --- Model Loading ---

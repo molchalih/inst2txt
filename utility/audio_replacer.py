@@ -10,8 +10,8 @@ from typing import List, Tuple, Optional
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-DB_PATH = "data/instagram_database_primary.db"
-AUDIO_SOURCE_DIR = "data/audio2"
+DB_PATH = "data/instagram_data.db"
+AUDIO_SOURCE_DIR = "data/audio"
 
 class AudioReprocessor:
     """

@@ -176,6 +176,8 @@ cython_debug/
 data/thumbnails/
 data/avatars/
 
+model_cache/
+
 bots.json
 bot.json
 sessions/

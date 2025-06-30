@@ -16,62 +16,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def test_hypothesis_1(hdbscan_results, following_data):
-    """
-    H1: Creators in the same visual cluster follow each other more.
-    """
-    logger.info("\n--- [Original] Testing Hypothesis 1: Intra-cluster vs. Inter-cluster following ---")
-    
-    intra_cluster_edges = 0
-    inter_cluster_edges = 0
-    
-    # Create a map of user_pk to cluster_id for quick lookups
-    user_cluster_map = {pk: data['cluster'] for pk, data in hdbscan_results.items()}
-    
-    for follower_pk, followed_pks in following_data.items():
-        if follower_pk not in user_cluster_map:
-            continue
-            
-        follower_cluster = user_cluster_map[follower_pk]
-        if follower_cluster == -1:  # Skip noise points as followers
-            continue
-            
-        for followed_pk in followed_pks:
-            if followed_pk not in user_cluster_map:
-                continue
-            
-            followed_cluster = user_cluster_map[followed_pk]
-            if followed_cluster == -1: # Skip noise points being followed
-                continue
-
-            if follower_cluster == followed_cluster:
-                intra_cluster_edges += 1
-            else:
-                inter_cluster_edges += 1
-                
-    total_edges = intra_cluster_edges + inter_cluster_edges
-    if total_edges == 0:
-        logger.warning("No following edges found between clustered creators. Cannot test H1.")
-        return
-
-    intra_cluster_rate = (intra_cluster_edges / total_edges) * 100
-    inter_cluster_rate = (inter_cluster_edges / total_edges) * 100
-
-    logger.info(f"Total connections analyzed: {total_edges}")
-    logger.info(f"Intra-cluster connections: {intra_cluster_edges} ({intra_cluster_rate:.2f}%)")
-    logger.info(f"Inter-cluster connections: {inter_cluster_edges} ({inter_cluster_rate:.2f}%)")
-
-    if intra_cluster_rate > inter_cluster_rate:
-        logger.info("✅ [Original] H1 Confirmed: Creators are more likely to follow others within their own aesthetic cluster.")
-    else:
-        logger.info("❌ [Original] H1 Rejected: Following patterns do not show a strong preference for same-cluster creators.")
-
-
 def test_hypothesis_1_permutation(hdbscan_results, following_data, n_permutations=1000):
     """
     H1 (Permutation Test): Tests if the observed intra-cluster connection rate is statistically significant.
     """
-    logger.info("\n--- [Improved] Testing Hypothesis 1 (Permutation Test) ---")
+    logger.info("\n--- Testing Hypothesis 1 (Permutation Test) ---")
     
     user_cluster_map = {pk: data['cluster'] for pk, data in hdbscan_results.items() if not data['is_noise']}
     if not user_cluster_map:
@@ -121,16 +70,16 @@ def test_hypothesis_1_permutation(hdbscan_results, following_data, n_permutation
     logger.info(f"Permutation test ({n_permutations} shuffles): Mean random rate={np.mean(permuted_rates):.4f}, p-value={p_value:.4f}")
 
     if p_value < 0.05:
-        logger.info("✅ [Improved] H1 Confirmed: The observed rate of intra-cluster following is statistically significant.")
+        logger.info("✅ H1 Confirmed: The observed rate of intra-cluster following is statistically significant.")
     else:
-        logger.info("❌ [Improved] H1 Rejected: The observed rate is not statistically significant compared to random chance.")
+        logger.info("❌ H1 Rejected: The observed rate is not statistically significant compared to random chance.")
 
 
 def test_hypothesis_2_local_cohesion(hdbscan_results, creator_profiles, hdbscan_clusterer, k=5):
     """
     H2 (Local Cohesion): Creators more aligned with their local aesthetic (closer to k-nearest neighbors) have higher confidence.
     """
-    logger.info(f"\n--- [Improved] Testing Hypothesis 2 (Local Cohesion with k={k}) ---")
+    logger.info(f"\n--- Testing Hypothesis 2 (Local Cohesion with k={k}) ---")
     
     user_pks = list(creator_profiles.keys())
     confidence_scores = hdbscan_clusterer.probabilities_
@@ -171,16 +120,16 @@ def test_hypothesis_2_local_cohesion(hdbscan_results, creator_profiles, hdbscan_
     logger.info(f"Spearman Correlation: {correlation:.4f}, P-value: {p_value:.4f}")
 
     if correlation < -0.2 and p_value < 0.05:
-        logger.info("✅ [Improved] H2 Confirmed: Creators with higher local cohesion (lower distance to neighbors) have significantly higher confidence scores.")
+        logger.info("✅ H2 Confirmed: Creators with higher local cohesion (lower distance to neighbors) have significantly higher confidence scores.")
     else:
-        logger.info("❌ [Improved] H2 Rejected: No significant correlation found between local cohesion and confidence.")
+        logger.info("❌ H2 Rejected: No significant correlation found between local cohesion and confidence.")
 
 
 def test_hypothesis_3_vector_bridge(hdbscan_results, creator_profiles, hdbscan_clusterer):
     """
     H3 (Vector Bridge): Creators aesthetically "between" clusters have lower confidence.
     """
-    logger.info("\n--- [Improved] Testing Hypothesis 3 (Vector-Based Bridge Creators) ---")
+    logger.info("\n--- Testing Hypothesis 3 (Vector-Based Bridge Creators) ---")
     
     user_pks = list(creator_profiles.keys())
     confidence_scores = hdbscan_clusterer.probabilities_
@@ -230,9 +179,9 @@ def test_hypothesis_3_vector_bridge(hdbscan_results, creator_profiles, hdbscan_c
     logger.info(f"Spearman Correlation (bridgeness ratio vs. confidence): {correlation:.4f}, P-value: {p_value:.4f}")
 
     if correlation > 0.2 and p_value < 0.05:
-        logger.info("✅ [Improved] H3 Confirmed: Creators more distinct from other clusters (less of a bridge) have higher confidence.")
+        logger.info("✅ H3 Confirmed: Creators more distinct from other clusters (less of a bridge) have higher confidence.")
     else:
-        logger.info("❌ [Improved] H3 Rejected: No significant correlation found between vector-based bridgeness and confidence.")
+        logger.info("❌ H3 Rejected: No significant correlation found between vector-based bridgeness and confidence.")
 
 
 def main():
@@ -255,12 +204,7 @@ def main():
         
     following_data = get_following_network_data(db_manager)
     
-    # Run original descriptive tests
-    test_hypothesis_1(hdbscan_results, following_data)
-    # The original H2 and H3 tests from the prompt were conceptual, so we run the new ones.
-
-    # Run new, more rigorous tests
-    logger.info("\n\n=== Running More Rigorous Statistical Tests ===")
+    # Run the rigorous statistical tests
     test_hypothesis_1_permutation(hdbscan_results, following_data)
     test_hypothesis_2_local_cohesion(hdbscan_results, creator_profiles, hdbscan_clusterer)
     test_hypothesis_3_vector_bridge(hdbscan_results, creator_profiles, hdbscan_clusterer)
